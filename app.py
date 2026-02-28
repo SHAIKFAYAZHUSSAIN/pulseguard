@@ -3,11 +3,17 @@ from flask_cors import CORS
 import joblib
 import numpy as np
 import sqlite3
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# Load trained model
+# ------------------ LOAD MODEL ------------------
+
 model = joblib.load("model.pkl")
 
 # ------------------ PREDICT ROUTE ------------------
@@ -15,7 +21,7 @@ model = joblib.load("model.pkl")
 @app.route("/predict", methods=["POST"])
 def predict():
     data = request.json
-    
+
     features = np.array([[
         data["Age"],
         data["SystolicBP"],
@@ -24,8 +30,6 @@ def predict():
         data["BodyTemp"],
         data["HeartRate"]
     ]])
-    
-    
 
     prediction_value = int(model.predict(features)[0])
 
@@ -39,14 +43,13 @@ def predict():
     probabilities = model.predict_proba(features)[0]
     confidence = float(max(probabilities))
 
-    # Get most important feature
     feature_names = ["Age", "SystolicBP", "DiastolicBP", "Blood glucose", "BodyTemp", "HeartRate"]
     importances = model.feature_importances_
     top_feature = feature_names[np.argmax(importances)]
 
     return jsonify({
         "risk": prediction,
-        "confidence": round(float(confidence), 2),
+        "confidence": round(confidence, 2),
         "top_factor": top_feature
     })
 
@@ -58,7 +61,7 @@ def emergency():
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT name, blood_group, hemoglobin, available
+        SELECT name, blood_group, hemoglobin, phone_number, location, available
         FROM donors
     """)
 
@@ -71,35 +74,83 @@ def emergency():
             "name": donor[0],
             "blood_group": donor[1],
             "hemoglobin": donor[2],
-            "available": bool(donor[3])
+            "phone_number": donor[3],
+            "location": donor[4],
+            "available": bool(donor[5])
         })
 
     return jsonify(donor_list)
 
-# ------------------ REGISTER ROUTE ------------------
+# ------------------ REGISTER DONOR ROUTE ------------------
 
 @app.route("/register-donor", methods=["POST"])
 def register_donor():
     data = request.json
+
     name = data.get("name")
     blood_group = data.get("blood_group")
     hemoglobin = data.get("hemoglobin")
+    phone_number = data.get("phone_number")
+    location = data.get("location")
     available = 1 if data.get("available") else 0
-    
+
     conn = sqlite3.connect("donors.db")
     cursor = conn.cursor()
-    
+
     cursor.execute("""
-    INSERT INTO donors (name, blood_group, hemoglobin, available)
-    VALUES (?, ?, ?, ?)
-    """, (name, blood_group, float(hemoglobin), available))
-    
+        INSERT INTO donors (name, blood_group, hemoglobin, phone_number, location, available)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name, blood_group, float(hemoglobin), phone_number, location, available))
+
     conn.commit()
     conn.close()
-    
+
     return jsonify({"success": True, "message": "Donor registered successfully"}), 201
 
-# ------------------
+# ------------------ CHATBOT ROUTE ------------------
+
+@app.route("/chatbot", methods=["POST"])
+def chatbot():
+    data = request.json
+    user_message = data.get("message", "")
+
+    api_key = os.getenv("AIzaSyDCkyXoXc-UKoeNwiwT8iAYoupF8qF9jOo")  # Do NOT hardcode API key
+
+    if not api_key:
+        return jsonify({"reply": "API key not configured on server."}), 500
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": user_message}]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url, json=payload)
+        
+        if response.status_code != 200:
+            print(f"Error from Gemini API: {response.status_code} - {response.text}")
+            try:
+                error_data = response.json()
+                err_msg = error_data.get("error", {}).get("message", "Unknown error from AI service")
+            except Exception:
+                err_msg = "Unknown error from AI service"
+            return jsonify({"reply": f"AI service error: {err_msg}"}), response.status_code
+            
+        result = response.json()
+        reply = result["candidates"][0]["content"]["parts"][0]["text"]
+
+        return jsonify({"reply": reply})
+
+    except Exception as e:
+        print(f"Exception during Gemini API call: {e}")
+        return jsonify({"reply": "AI service currently unavailable."}), 500
+
+# ------------------ RUN APP ------------------
 
 if __name__ == "__main__":
     app.run(debug=True)
